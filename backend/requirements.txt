@@ -1,14 +1,35 @@
+# Flask and web dependencies
 flask==2.3.3
 flask-cors==4.0.0
-netCDF4==1.6.4
+requests==2.31.0
+
+# Scientific computing and data processing
 numpy==1.24.3
 scipy==1.11.1
-numba==0.57.1
-rasterio==1.3.8
-shapely==2.0.1
+pandas==2.0.3
+
+# Machine learning and deep learning
 tensorflow==2.13.0
 scikit-learn==1.3.0
-requests==2.31.0
-python-dateutil==2.8.2
+
+# Geospatial libraries
+geopandas==0.13.2
+shapely==2.0.1
 geopy==2.3.0
-pandas==2.0.3
+fiona==1.9.4
+pyproj==3.6.0
+
+# Numerical optimization
+numba==0.57.1
+
+# Optional geospatial data (fallback if geopandas has issues)
+rasterio==1.3.8
+
+# NetCDF data handling (if you plan to use weather data files)
+netCDF4==1.6.4
+
+# Date and time utilities
+python-dateutil==2.8.2
+
+# Path smoothing and interpolation
+matplotlib==3.7.2  # For potential visualization needs
