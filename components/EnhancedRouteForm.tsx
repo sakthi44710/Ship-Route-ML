@@ -21,7 +21,6 @@ import { DateTimePicker } from "./ui/date-time-picker"
 import { Switch } from "./ui/switch"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
 import { Badge } from "./ui/badge"
-import { format } from 'date-fns'
 
 interface WeatherInfo {
   position: [number, number];
@@ -38,6 +37,7 @@ interface WeatherInfo {
   };
 }
 
+// Updated interface to match the full backend response
 interface RouteOptimizationResult {
   optimized_route: [number, number][];
   total_distance_km: number;
@@ -45,6 +45,13 @@ interface RouteOptimizationResult {
   weather_forecast?: WeatherInfo[];
   route_method: 'ML' | 'Physics-based';
   waypoints_count: number;
+  estimated_savings_km: number;
+  direct_distance_km: number;
+}
+
+// Interface for a JSON error response from the backend
+interface ErrorResponse {
+  error: string;
 }
 
 interface ModelStatus {
@@ -71,7 +78,7 @@ export default function EnhancedRouteForm({
   setIsSelectingLocation 
 }: RouteFormProps) {
   const [shipType, setShipType] = useState('')
-  const [departureDate, setDepartureDate] = useState<Date | undefined>(new Date(2024, 7, 25))
+  const [departureDate, setDepartureDate] = useState<Date | undefined>(new Date())
   const [isLoading, setIsLoading] = useState(false)
   const [currentError, setCurrentError] = useState<string | null>(null)
   const [useMLRouting, setUseMLRouting] = useState(true)
@@ -125,7 +132,7 @@ export default function EnhancedRouteForm({
       'tanker': {
         speed: '12-15 knots',
         characteristics: 'Fuel efficient, weather resilient', 
-        icon: '🛢️',
+        icon: '🛢',
         description: 'Optimized for fuel efficiency and cargo safety'
       }
     }
@@ -133,26 +140,23 @@ export default function EnhancedRouteForm({
     return shipInfo[type.toLowerCase() as keyof typeof shipInfo]
   }
 
+  // Updated to use accurate data from the backend
   const calculateEstimatedSavings = () => {
-    if (!routeResults) return null
+    if (!routeResults || routeResults.estimated_savings_km <= 0) return null
     
-    // Rough estimates for comparison
-    const directDistance = startPort && endPort ? 
-      Math.sqrt(
-        Math.pow(endPort[1] - startPort[1], 2) + 
-        Math.pow(endPort[0] - startPort[0], 2)
-      ) * 111.32 : 0
+    const distanceSaved = routeResults.estimated_savings_km;
     
-    const routeDistance = routeResults.total_distance_km
-    const distanceSaved = Math.max(0, directDistance * 1.2 - routeDistance) // Assume 20% longer for direct shipping route
-    const timeSaved = distanceSaved / 15 * 1.852 // Rough time calculation
-    const fuelSaved = distanceSaved * 0.1 // Rough fuel calculation (tons)
+    // Use more realistic estimates for savings calculations
+    const avgSpeedKnots = 15;
+    const timeSaved = distanceSaved / (avgSpeedKnots * 1.852); // Time in hours
+    const fuelSaved = distanceSaved * 0.04; // Fuel in tons (e.g., 40kg per km)
+    const costSaved = fuelSaved * 600; // Cost in USD (e.g., $600 per ton)
     
     return {
       distance: distanceSaved,
       time: timeSaved,
       fuel: fuelSaved,
-      cost: fuelSaved * 500 // Rough cost per ton of fuel
+      cost: costSaved
     }
   }
 
@@ -166,52 +170,47 @@ export default function EnhancedRouteForm({
 
     setIsLoading(true)
     try {
-      console.log('Sending request with data:', {
+      const payload = {
         shipType,
         startPort,
         endPort,
-        departureDate: departureDate ? format(departureDate, 'yyyy-MM-dd') : undefined,
-      });
+        // FIX: Send full ISO string for backend compatibility
+        departureDate: departureDate ? departureDate.toISOString() : undefined,
+        useMLRouting,
+      };
+      console.log('Sending request with payload:', payload);
 
       const response = await fetch('http://localhost:5000/optimize_route', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          shipType,
-          startPort,
-          endPort,
-          departureDate: departureDate ? format(departureDate, 'yyyy-MM-dd') : undefined,
-          useMLRouting,
-        }),
+        body: JSON.stringify(payload),
       });
 
-      const data: RouteOptimizationResult = await response.json();
+      // Await response body regardless of status
+      const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || `HTTP error! status: ${response.status}`);
+        // FIX: Correctly handle JSON error from the server
+        const errorMessage = (data as ErrorResponse).error || `HTTP error! status: ${response.status}`;
+        throw new Error(errorMessage);
       }
 
-      console.log('Received data:', data);
+      const resultData = data as RouteOptimizationResult;
+      console.log('Received data:', resultData);
       
-      setSelectedRoute(data.optimized_route);
-      setRouteResults(data);
+      setSelectedRoute(resultData.optimized_route);
+      setRouteResults(resultData);
       
-      // Set weather forecast if available and callback provided
-      if (data.weather_forecast && setWeatherForecast) {
-        setWeatherForecast(data.weather_forecast);
+      if (resultData.weather_forecast && setWeatherForecast) {
+        setWeatherForecast(resultData.weather_forecast);
       }
       
     } catch (error: unknown) {
       console.error('Error optimizing route:', error);
-      const message =
-        typeof error === 'string'
-          ? error
-          : error instanceof Error
-            ? error.message
-            : 'Unknown error';
-      setCurrentError(`Error optimizing route: ${message}. Please try again.`);
+      const message = error instanceof Error ? error.message : 'An unknown error occurred.';
+      setCurrentError(`Error: ${message} Please check console for details.`);
     } finally {
       setIsLoading(false)
     }
@@ -294,7 +293,7 @@ export default function EnhancedRouteForm({
               </div>
             </div>
             
-            {savings && savings.distance > 0 && (
+            {savings && (
               <div className="pt-3 border-t border-gray-200 dark:border-gray-700">
                 <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">Estimated Savings vs. Direct Route:</p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
@@ -332,7 +331,7 @@ export default function EnhancedRouteForm({
               <SelectContent>
                 <SelectItem value="Passenger ship">🚢 Passenger Ship</SelectItem>
                 <SelectItem value="Cargo ship">🚛 Cargo Ship</SelectItem>
-                <SelectItem value="Tanker">🛢️ Tanker</SelectItem>
+                <SelectItem value="Tanker">🛢 Tanker</SelectItem>
               </SelectContent>
             </Select>
             
@@ -499,8 +498,8 @@ export default function EnhancedRouteForm({
                     </h4>
                     <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
                       {useMLRouting && modelStatus?.ml_model_ready ? 
-                        'Uses machine learning trained on weather patterns, ship characteristics, and historical data to optimize routes for fuel efficiency, safety, and time.' :
-                        'Uses real-time weather data and physics-based calculations to find optimal routes considering wind, waves, and ship characteristics.'
+                        'Uses a trained neural network to predict the optimal path based on weather, ship data, and land avoidance.' :
+                        'Uses a physics-based model to calculate an efficient route considering real-time weather and land avoidance.'
                       }
                     </p>
                   </div>

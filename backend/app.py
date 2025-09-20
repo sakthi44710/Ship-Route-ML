@@ -12,6 +12,8 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from geopy.distance import geodesic
+from scipy.interpolate import splprep, splev
+import ship_routing_model  # Assume this is our ML model package
 
 # Import our enhanced ML model components
 try:
@@ -27,11 +29,29 @@ except ImportError as e:
     LandMaskService = None
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "http://127.0.0.1:3000"]}})
+# FIX: Broaden CORS policy to ensure the frontend can communicate with the backend.
+# This is a more robust setting for development.
+CORS(app)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def smooth_path(path_points, num_points=100):
+    """Smooths a path using spline interpolation."""
+    if len(path_points) < 4:
+        return path_points
+    path_points = np.array(path_points)
+    try:
+        tck, u = splprep([path_points[:, 0], path_points[:, 1]], s=1.0, k=min(3, len(path_points)-1))
+        u_new = np.linspace(u.min(), u.max(), num_points)
+        x_new, y_new = splev(u_new, tck, der=0)
+        smoothed = np.c_[x_new, y_new]
+        smoothed[0], smoothed[-1] = path_points[0], path_points[-1]
+        return smoothed.tolist()
+    except Exception as e:
+        logger.error(f"Could not smooth path: {e}")
+        return path_points # Return original path if smoothing fails
 
 class EnhancedWeatherService:
     """Enhanced weather service with multiple data sources"""
@@ -180,7 +200,7 @@ class EnhancedWeatherService:
         base_wave = 1.5 + lat_factor * 2.5 + monsoon_factor * 1.5
         
         weather_system = np.random.choice(['calm', 'normal', 'rough', 'storm'], 
-                                        p=[0.25, 0.50, 0.20, 0.05])
+                                           p=[0.25, 0.50, 0.20, 0.05])
         
         multipliers = {'calm': 0.3, 'normal': 1.0, 'rough': 1.8, 'storm': 3.0}
         system_mult = multipliers[weather_system]
@@ -248,8 +268,8 @@ class MLRouteOptimizer:
         threading.Thread(target=init, daemon=True).start()
     
     def generate_ml_route(self, start_lat: float, start_lon: float, 
-                         end_lat: float, end_lon: float, 
-                         ship_type: str, departure_time: datetime = None) -> List[List[float]]:
+                          end_lat: float, end_lon: float, 
+                          ship_type: str, departure_time: datetime = None) -> List[List[float]]:
         """Generate route using enhanced ML model with land avoidance"""
         if not self.is_initialized or self.route_generator is None:
             raise Exception("Enhanced ML model not initialized yet, please wait or use fallback routing")
@@ -279,8 +299,8 @@ class FallbackRouteOptimizer:
         self.land_mask = LandMaskService() if LandMaskService else None
     
     def generate_route(self, start_lat: float, start_lon: float,
-                      end_lat: float, end_lon: float,
-                      ship_type: str, departure_time: datetime = None) -> Tuple[List[List[float]], float, float]:
+                       end_lat: float, end_lon: float,
+                       ship_type: str, departure_time: datetime = None) -> Tuple[List[List[float]], float, float]:
         """Generate route using enhanced physics-based approach with land avoidance"""
         if departure_time is None:
             departure_time = datetime.now()
@@ -463,31 +483,20 @@ def optimize_route():
             departure_time = datetime.now()
         
         route_method = "Physics-based"
+        raw_route_coords = []
+        total_distance = 0
+        travel_time_hours = 0
         
         # Try ML-based routing first if requested and available
         if use_ml and ml_optimizer.is_initialized:
             try:
                 logger.info("🤖 Using enhanced AI-based route optimization with land avoidance")
-                optimized_route = ml_optimizer.generate_ml_route(
+                raw_route_coords = ml_optimizer.generate_ml_route(
                     start_port[1], start_port[0],  # lat, lon
                     end_port[1], end_port[0],      # lat, lon
                     ship_type, departure_time
                 )
-                
-                # Calculate total distance
-                total_distance = 0
-                for i in range(len(optimized_route) - 1):
-                    lon1, lat1 = optimized_route[i]
-                    lon2, lat2 = optimized_route[i+1]
-                    total_distance += geodesic((lat1, lon1), (lat2, lon2)).kilometers
-                
-                # Estimate time
-                ship_speeds = {"passenger ship": 22, "cargo ship": 16, "tanker": 12}
-                avg_speed = ship_speeds.get(ship_type.lower(), 16)
-                travel_time_hours = total_distance / (avg_speed * 1.852)
-                
                 route_method = "ML"
-                
             except Exception as ml_error:
                 logger.warning(f"⚠️  Enhanced AI routing failed: {ml_error}, using fallback method")
                 use_ml = False
@@ -496,23 +505,42 @@ def optimize_route():
         if not use_ml or not ml_optimizer.is_initialized:
             logger.info("⚙️  Using enhanced physics-based route optimization with land avoidance")
             
-            optimized_route, total_distance, travel_time_hours = fallback_optimizer.generate_route(
+            raw_route_coords, total_distance, travel_time_hours = fallback_optimizer.generate_route(
                 start_port[1], start_port[0],  # lat, lon
                 end_port[1], end_port[0],      # lat, lon
                 ship_type, departure_time
             )
+
+        # Smooth the final path for better visualization
+        logger.info(f"✨ Smoothing the generated route of {len(raw_route_coords)} points...")
+        smoothed_route = smooth_path(raw_route_coords, num_points=200)
+        logger.info(f"✅ Route smoothed to {len(smoothed_route)} points.")
+
+        # Recalculate total distance and time with the new smoothed path for accuracy
+        final_total_distance = 0
+        if len(smoothed_route) > 1:
+            for i in range(len(smoothed_route) - 1):
+                try:
+                    p1 = smoothed_route[i]
+                    p2 = smoothed_route[i+1]
+                    # geopy.distance.geodesic expects (latitude, longitude)
+                    final_total_distance += geodesic((p1[1], p1[0]), (p2[1], p2[0])).kilometers
+                except Exception as e:
+                    logger.warning(f"Could not calculate distance for segment: {e}")
         
-        # Get enhanced weather information for the route
+        avg_speed = {"passenger ship": 22, "cargo ship": 16, "tanker": 12}.get(ship_type.lower(), 16)
+        final_travel_time_hours = final_total_distance / (avg_speed * 1.852) if avg_speed > 0 else 0
+        
         weather_info = []
         try:
             # Sample weather at key points along the route
-            sample_points = min(8, len(optimized_route))
+            sample_points = min(8, len(smoothed_route))
             if sample_points > 0:
-                step = max(1, len(optimized_route) // sample_points)
+                step = max(1, len(smoothed_route) // sample_points)
                 
-                for i in range(0, len(optimized_route), step):
-                    lon, lat = optimized_route[i]
-                    time_offset = i * (travel_time_hours / len(optimized_route))
+                for i in range(0, len(smoothed_route), step):
+                    lon, lat = smoothed_route[i]
+                    time_offset = i * (final_travel_time_hours / len(smoothed_route))
                     weather = weather_service.get_weather_forecast(lat, lon, int(time_offset))
                     weather_info.append({
                         'position': [lon, lat],
@@ -523,22 +551,22 @@ def optimize_route():
         
         # Calculate estimated savings
         direct_distance = geodesic((start_port[1], start_port[0]), (end_port[1], end_port[0])).kilometers
-        estimated_savings = max(0, (direct_distance * 1.15) - total_distance)  # Assume direct route is 15% longer due to no optimization
+        estimated_savings = max(0, (direct_distance * 1.15) - final_total_distance)  # Assume direct route is 15% longer due to no optimization
         
         response = {
-            "optimized_route": optimized_route,
-            "total_distance_km": float(total_distance),
-            "travel_time_hours": float(travel_time_hours),
+            "optimized_route": smoothed_route,
+            "total_distance_km": float(final_total_distance),
+            "travel_time_hours": float(final_travel_time_hours),
             "weather_forecast": weather_info,
             "route_method": route_method,
-            "waypoints_count": len(optimized_route),
+            "waypoints_count": len(smoothed_route),
             "estimated_savings_km": float(estimated_savings),
             "direct_distance_km": float(direct_distance),
-            "route_efficiency": float((direct_distance / total_distance) * 100) if total_distance > 0 else 100,
+            "route_efficiency": float((direct_distance / final_total_distance) * 100) if final_total_distance > 0 else 100,
             "land_avoidance_enabled": ml_optimizer.land_mask is not None or fallback_optimizer.land_mask is not None
         }
         
-        logger.info(f"✅ Route generated successfully: {len(optimized_route)} waypoints, {total_distance:.1f}km, {route_method} method")
+        logger.info(f"✅ Route generated successfully: {len(smoothed_route)} waypoints, {final_total_distance:.1f}km, {route_method} method")
         return jsonify(response), 200
         
     except Exception as e:
